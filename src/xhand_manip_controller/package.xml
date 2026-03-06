@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+    <name>xhand_manip_controller</name>
+    <version>1.0.0</version>
+    <description>G1 + XHand manipulation controller for RL-based dexterous manipulation</description>
+    <maintainer email="jeff@todo.com">jeff</maintainer>
+    <license>MIT</license>
+
+    <buildtool_depend>ament_cmake</buildtool_depend>
+    <build_depend>ament_cmake_auto</build_depend>
+
+    <depend>legged_rl_controllers</depend>
+
+    <export>
+        <build_type>ament_cmake</build_type>
+    </export>
+</package>

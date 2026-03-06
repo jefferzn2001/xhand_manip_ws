@@ -1,0 +1,9 @@
+<library path="xhand_manip_controller">
+  <class name="xhand_manip_controller/XhandManipController"
+         type="legged::XhandManipController"
+         base_class_type="controller_interface::ControllerInterface">
+    <description>
+      G1 + XHand manipulation controller with RL policy inference via ONNX.
+    </description>
+  </class>
+</library>

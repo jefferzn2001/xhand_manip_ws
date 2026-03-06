@@ -1,0 +1,103 @@
+controller_manager:
+  ros__parameters:
+    update_rate: 500  # Hz
+
+    state_estimator:
+      type: legged_controllers/StateEstimator
+    standby_controller:
+      type: legged_controllers/StandbyController
+    walking_controller:
+      type: xhand_manip_controller/XhandManipController
+
+state_estimator:
+  ros__parameters:
+    model:
+      base_name: "pelvis"
+      six_dof_contact_names: [ "LL_FOOT", "LR_FOOT" ]
+
+standby_controller:
+  ros__parameters:
+    joint_names:
+      # --- Legs (12 DOF) ---
+      [ left_hip_pitch_joint, left_hip_roll_joint, left_hip_yaw_joint,
+        left_knee_joint, left_ankle_pitch_joint, left_ankle_roll_joint,
+        right_hip_pitch_joint, right_hip_roll_joint, right_hip_yaw_joint,
+        right_knee_joint, right_ankle_pitch_joint, right_ankle_roll_joint,
+        # --- Waist (3 DOF) ---
+        waist_yaw_joint, waist_roll_joint, waist_pitch_joint,
+        # --- Left arm (7 DOF) ---
+        left_shoulder_pitch_joint, left_shoulder_roll_joint, left_shoulder_yaw_joint,
+        left_elbow_joint, left_wrist_roll_joint, left_wrist_pitch_joint, left_wrist_yaw_joint,
+        # --- Right arm (7 DOF) ---
+        right_shoulder_pitch_joint, right_shoulder_roll_joint, right_shoulder_yaw_joint,
+        right_elbow_joint, right_wrist_roll_joint, right_wrist_pitch_joint, right_wrist_yaw_joint,
+        # --- Right XHand (12 DOF) ---
+        right_hand_thumb_bend_joint, right_hand_thumb_rota_joint1, right_hand_thumb_rota_joint2,
+        right_hand_index_bend_joint, right_hand_index_joint1, right_hand_index_joint2,
+        right_hand_mid_joint1, right_hand_mid_joint2,
+        right_hand_ring_joint1, right_hand_ring_joint2,
+        right_hand_pinky_joint1, right_hand_pinky_joint2,
+        # --- Left XHand (12 DOF) ---
+        left_hand_thumb_bend_joint, left_hand_thumb_rota_joint1, left_hand_thumb_rota_joint2,
+        left_hand_index_bend_joint, left_hand_index_joint1, left_hand_index_joint2,
+        left_hand_mid_joint1, left_hand_mid_joint2,
+        left_hand_ring_joint1, left_hand_ring_joint2,
+        left_hand_pinky_joint1, left_hand_pinky_joint2 ]
+
+    # 29 (stock G1) + 24 (two XHands) = 53 joints total
+    default_position:
+      # Legs (12)
+      [ -0.312, 0.0, 0.0, 0.669, -0.363, 0.0,
+        -0.312, 0.0, 0.0, 0.669, -0.363, 0.0,
+        # Waist (3)
+        0.0, 0.0, 0.0,
+        # Left arm (7)
+        0.2, 0.2, 0.0, 0.6, 0.0, 0.0, 0.0,
+        # Right arm (7)
+        0.2, -0.2, 0.0, 0.6, 0.0, 0.0, 0.0,
+        # Right XHand (12) - neutral open
+        0.0, 0.0, 0.0,  0.0, 0.0, 0.0,
+        0.0, 0.0,  0.0, 0.0,  0.0, 0.0,
+        # Left XHand (12) - neutral open
+        0.0, 0.0, 0.0,  0.0, 0.0, 0.0,
+        0.0, 0.0,  0.0, 0.0,  0.0, 0.0 ]
+
+    kp:
+      # Legs (12): high stiffness for standing
+      [ 350.0, 200.0, 200.0, 300.0, 300.0, 150.0,
+        350.0, 200.0, 200.0, 300.0, 300.0, 150.0,
+        # Waist (3)
+        200.0, 200.0, 200.0,
+        # Left arm (7)
+        40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0,
+        # Right arm (7)
+        40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0,
+        # Right XHand (12): low stiffness for tiny finger joints
+        2.0, 2.0, 2.0,  2.0, 2.0, 2.0,
+        2.0, 2.0,  2.0, 2.0,  2.0, 2.0,
+        # Left XHand (12)
+        2.0, 2.0, 2.0,  2.0, 2.0, 2.0,
+        2.0, 2.0,  2.0, 2.0,  2.0, 2.0 ]
+
+    kd:
+      # Legs (12)
+      [ 5.0, 5.0, 5.0, 10.0, 5.0, 5.0,
+        5.0, 5.0, 5.0, 10.0, 5.0, 5.0,
+        # Waist (3)
+        5.0, 5.0, 5.0,
+        # Left arm (7)
+        3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0,
+        # Right arm (7)
+        3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0,
+        # Right XHand (12): low damping
+        0.1, 0.1, 0.1,  0.1, 0.1, 0.1,
+        0.1, 0.1,  0.1, 0.1,  0.1, 0.1,
+        # Left XHand (12)
+        0.1, 0.1, 0.1,  0.1, 0.1, 0.1,
+        0.1, 0.1,  0.1, 0.1,  0.1, 0.1 ]
+
+walking_controller:
+  ros__parameters:
+    update_rate: 50
+    policy:
+      path: "config/policy.onnx"
