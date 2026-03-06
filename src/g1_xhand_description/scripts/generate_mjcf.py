@@ -21,9 +21,11 @@ from pathlib import Path
 HAND_MASS_TARGET = 1.169  # kg, user-measured per hand
 HAND_OFFSET_RIGHT = "0.0465 -0.003 0"  # stock 0.0415 + 5 mm gap
 HAND_OFFSET_LEFT = "0.0465 0.003 0"
-# Reason: XHand fingers extend along +Z but G1 arm extends along +X,
-# so we rotate +90° about Y (pitch) to align Z→X.
-HAND_ROTATION_QUAT = "0.707107 0 0.707107 0"  # pitch = +π/2
+# Reason: XHand fingers extend along +Z but G1 arm extends along +X.
+# Pitch +90° aligns Z→X (fingers forward), then local yaw ±90° twists
+# the hand so thumbs point up and palms face inward (natural rest pose).
+HAND_ROTATION_QUAT_RIGHT = "0.5 0.5 0.5 0.5"
+HAND_ROTATION_QUAT_LEFT = "0.5 -0.5 0.5 -0.5"
 MIN_MASS = 1e-4
 MIN_INERTIA = 1e-8
 
@@ -335,11 +337,13 @@ def main():
     worldbody = mjcf.find("worldbody")
 
     configs = [
-        ("right", r_links, r_children, r_root, r_scale, HAND_OFFSET_RIGHT),
-        ("left", l_links, l_children, l_root, l_scale, HAND_OFFSET_LEFT),
+        ("right", r_links, r_children, r_root, r_scale,
+         HAND_OFFSET_RIGHT, HAND_ROTATION_QUAT_RIGHT),
+        ("left", l_links, l_children, l_root, l_scale,
+         HAND_OFFSET_LEFT, HAND_ROTATION_QUAT_LEFT),
     ]
 
-    for side, links, children, root_link, scale, offset in configs:
+    for side, links, children, root_link, scale, offset, rot_quat in configs:
         wrist = worldbody.find(f".//body[@name='{side}_wrist_yaw_link']")
         if wrist is None:
             print(f"  WARNING: {side}_wrist_yaw_link not found!")
@@ -357,7 +361,7 @@ def main():
 
         xhand_body = build_xhand_body(root_link, links, children, scale)
         xhand_body.set("pos", offset)
-        xhand_body.set("quat", HAND_ROTATION_QUAT)
+        xhand_body.set("quat", rot_quat)
 
         palm = ET.SubElement(xhand_body, "site")
         palm.set("name", f"{side}_palm")

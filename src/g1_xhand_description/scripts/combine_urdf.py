@@ -25,10 +25,11 @@ G1_REMOVE_JOINTS = ["left_hand_palm_joint", "right_hand_palm_joint"]
 # G1 wrist -> xhand attachment origins
 # Stock G1 palm joint is at 41.5mm from wrist along X.
 # Adding 5mm spacer between wrist end-effector and XHand palm = 46.5mm total.
-# Reason: XHand fingers extend along +Z but G1 arm extends along +X,
-# so we rotate +90° about Y (pitch) to align Z→X.
-RIGHT_HAND_ORIGIN = {"xyz": "0.0465 -0.003 0", "rpy": "0 1.5708 0"}
-LEFT_HAND_ORIGIN = {"xyz": "0.0465 0.003 0", "rpy": "0 1.5708 0"}
+# Reason: XHand fingers extend along +Z but G1 arm extends along +X.
+# Pitch +90° aligns Z→X (fingers forward), then local yaw ±90° twists
+# the hand so thumbs point up and palms face inward (natural rest pose).
+RIGHT_HAND_ORIGIN = {"xyz": "0.0465 -0.003 0", "rpy": "1.5708 0 1.5708"}
+LEFT_HAND_ORIGIN = {"xyz": "0.0465 0.003 0", "rpy": "-1.5708 0 -1.5708"}
 
 
 def parse_urdf(path: str) -> ET.ElementTree:

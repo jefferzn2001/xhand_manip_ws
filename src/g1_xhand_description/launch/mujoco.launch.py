@@ -118,13 +118,19 @@ def setup_controllers(context):
 
     all_controllers = _get_controller_names(config_path)
     active_list = ["state_estimator", "standby_controller"]
-    inactive_list = [c for c in all_controllers if c not in active_list]
+    inactive_list = [
+        c for c in all_controllers
+        if c not in active_list and c != "walking_controller"
+    ]
 
     param_file = LaunchConfiguration("controllers_yaml")
-    active = _control_spawner(active_list, param_file=param_file)
-    inactive = _control_spawner(inactive_list, param_file=param_file, inactive=True)
+    actions = [set_yaml, _control_spawner(active_list, param_file=param_file)]
+    if inactive_list:
+        actions.append(
+            _control_spawner(inactive_list, param_file=param_file, inactive=True)
+        )
 
-    return [set_yaml, active, inactive]
+    return actions
 
 
 def generate_launch_description():
