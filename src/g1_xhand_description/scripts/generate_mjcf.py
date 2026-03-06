@@ -21,6 +21,9 @@ from pathlib import Path
 HAND_MASS_TARGET = 1.169  # kg, user-measured per hand
 HAND_OFFSET_RIGHT = "0.0465 -0.003 0"  # stock 0.0415 + 5 mm gap
 HAND_OFFSET_LEFT = "0.0465 0.003 0"
+# Reason: XHand fingers extend along +Z but G1 arm extends along +X,
+# so we rotate +90° about Y (pitch) to align Z→X.
+HAND_ROTATION_QUAT = "0.707107 0 0.707107 0"  # pitch = +π/2
 MIN_MASS = 1e-4
 MIN_INERTIA = 1e-8
 
@@ -354,6 +357,7 @@ def main():
 
         xhand_body = build_xhand_body(root_link, links, children, scale)
         xhand_body.set("pos", offset)
+        xhand_body.set("quat", HAND_ROTATION_QUAT)
 
         palm = ET.SubElement(xhand_body, "site")
         palm.set("name", f"{side}_palm")

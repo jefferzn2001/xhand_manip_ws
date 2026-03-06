@@ -117,7 +117,7 @@ def setup_controllers(context):
     set_yaml = SetLaunchConfiguration(name="controllers_yaml", value=temp_config)
 
     all_controllers = _get_controller_names(config_path)
-    active_list = ["state_estimator", "walking_controller"]
+    active_list = ["state_estimator", "standby_controller"]
     inactive_list = [c for c in all_controllers if c not in active_list]
 
     param_file = LaunchConfiguration("controllers_yaml")
