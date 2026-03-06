@@ -13,6 +13,9 @@ __pycache__/
 .vscode/
 .idea/
 
+# External repos / experiments
+/whole_body_tracking/
+
 # OS
 .DS_Store
 Thumbs.db
