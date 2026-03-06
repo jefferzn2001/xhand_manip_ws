@@ -69,9 +69,9 @@ standby_controller:
         # Waist (3)
         200.0, 200.0, 200.0,
         # Left arm (7): increased for XHand weight (~1.17kg per hand)
-        80.0, 80.0, 80.0, 80.0, 20.0, 20.0, 20.0,
+        40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0,
         # Right arm (7)
-        80.0, 80.0, 80.0, 80.0, 20.0, 20.0, 20.0,
+        40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0,
         # Right XHand (12): low stiffness for tiny finger joints
         2.0, 2.0, 2.0,  2.0, 2.0, 2.0,
         2.0, 2.0,  2.0, 2.0,  2.0, 2.0,
