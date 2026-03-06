@@ -31,14 +31,9 @@ fi
 # The STL files are committed in the repo under meshes/
 echo "[OK] XHand meshes already in src/g1_xhand_description/meshes/"
 
-# 4. Regenerate MJCF (requires mujoco Python package)
-if python3 -c "import mujoco" 2>/dev/null; then
-    echo "Generating MuJoCo MJCF..."
-    python3 "$DESC_DIR/scripts/generate_mjcf.py"
-else
-    echo "[WARN] mujoco Python package not found, skipping MJCF generation"
-    echo "       Install with: pip install mujoco"
-fi
+# 4. Regenerate MJCF (modifies stock G1 MJCF, adds XHand bodies)
+echo "Generating MuJoCo MJCF..."
+python3 "$DESC_DIR/scripts/generate_mjcf.py"
 
 echo ""
 echo "=== Setup complete ==="

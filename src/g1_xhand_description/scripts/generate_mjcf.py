@@ -1,305 +1,388 @@
 #!/usr/bin/env python3
 """
-Generate G1+XHand MJCF for MuJoCo simulation.
+Generate G1+XHand MJCF by modifying the stock G1 MJCF directly.
 
-Converts the combined URDF to MJCF using MuJoCo's compiler, then merges
-in physics properties (contact, tendons, sensors) from the stock G1 MJCF.
+Instead of compiling from URDF (which loses visual meshes, sensors, contacts),
+this script takes the working stock G1 MJCF and replaces the rubber hands
+with XHand body trees parsed from the XHand URDFs.
+
+Preserves: visual meshes, IMU sensors, contact pairs, tendons, defaults,
+floor, lighting, skybox -- everything that makes the stock G1 work.
 
 Usage:
-    python generate_mjcf.py [--urdf <path>] [--output <path>]
+    python generate_mjcf.py [--stock-mjcf <path>] [--output <path>]
 """
 
 import argparse
-import shutil
-import sys
-import tempfile
+import math
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+HAND_MASS_TARGET = 1.169  # kg, user-measured per hand
+HAND_OFFSET_RIGHT = "0.0465 -0.003 0"  # stock 0.0415 + 5 mm gap
+HAND_OFFSET_LEFT = "0.0465 0.003 0"
+MIN_MASS = 1e-4
+MIN_INERTIA = 1e-8
 
-def resolve_mesh_paths(urdf_path: str, output_urdf_path: str, mesh_dir: str) -> None:
+
+def rpy_to_quat(roll: float, pitch: float, yaw: float) -> tuple:
     """
-    Rewrite package:// mesh paths in URDF to absolute paths for MuJoCo.
-    Also fixes degenerate inertias that MuJoCo's compiler rejects.
+    Convert RPY (XYZ extrinsic) angles to MuJoCo wxyz quaternion.
 
     Args:
-        urdf_path: Input URDF path.
-        output_urdf_path: Output URDF path with resolved paths.
-        mesh_dir: Absolute path to directory containing all mesh files.
+        roll: Roll angle in radians.
+        pitch: Pitch angle in radians.
+        yaw: Yaw angle in radians.
+
+    Returns:
+        tuple: (w, x, y, z) quaternion.
+    """
+    cr, sr = math.cos(roll / 2), math.sin(roll / 2)
+    cp, sp = math.cos(pitch / 2), math.sin(pitch / 2)
+    cy, sy = math.cos(yaw / 2), math.sin(yaw / 2)
+    return (
+        cr * cp * cy + sr * sp * sy,
+        sr * cp * cy - cr * sp * sy,
+        cr * sp * cy + sr * cp * sy,
+        cr * cp * sy - sr * sp * cy,
+    )
+
+
+def _fmt_quat(q: tuple) -> str:
+    """Format quaternion tuple as MuJoCo attribute string."""
+    return f"{q[0]:.6f} {q[1]:.6f} {q[2]:.6f} {q[3]:.6f}"
+
+
+def parse_xhand_urdf(urdf_path: str) -> tuple:
+    """
+    Parse XHand URDF into link data, kinematic tree, and root link name.
+
+    Args:
+        urdf_path: Path to XHand URDF file.
+
+    Returns:
+        tuple: (links dict, children_of dict, root_link_name)
     """
     tree = ET.parse(urdf_path)
     root = tree.getroot()
 
-    for mesh in root.iter("mesh"):
-        filename = mesh.get("filename", "")
-        if "package://" in filename:
-            mesh_file = filename.split("/meshes/")[-1]
-            mesh.set("filename", str(Path(mesh_dir) / mesh_file))
+    links = {}
+    for link_elem in root.findall("link"):
+        name = link_elem.get("name")
+        info = {"name": name, "mass": 0.0, "inertial_pos": "0 0 0"}
 
-    # Fix degenerate inertias -- XHand has dummy links (ee, back, tips,
-    # rotaback) with near-zero mass and 1e-11 inertia values which
-    # MuJoCo rejects ("inertia must have positive eigenvalues").
-    MIN_INERTIA = 1e-8
-    MIN_MASS = 1e-4
-    fixed_count = 0
-    for link in root.findall("link"):
-        inertial = link.find("inertial")
-        if inertial is None:
-            continue
-        mass_elem = inertial.find("mass")
-        inertia_elem = inertial.find("inertia")
-        if mass_elem is None or inertia_elem is None:
-            continue
+        inertial = link_elem.find("inertial")
+        if inertial is not None:
+            mass_e = inertial.find("mass")
+            if mass_e is not None:
+                info["mass"] = float(mass_e.get("value", "0"))
+            origin_e = inertial.find("origin")
+            if origin_e is not None:
+                info["inertial_pos"] = origin_e.get("xyz", "0 0 0")
+            inertia_e = inertial.find("inertia")
+            if inertia_e is not None:
+                info["inertia"] = {
+                    k: float(inertia_e.get(k, "0"))
+                    for k in ("ixx", "ixy", "ixz", "iyy", "iyz", "izz")
+                }
 
-        mass_val = float(mass_elem.get("value", "0"))
-        if mass_val < MIN_MASS:
-            mass_elem.set("value", str(MIN_MASS))
-            for attr in ["ixx", "iyy", "izz"]:
-                val = float(inertia_elem.get(attr, "0"))
-                if val < MIN_INERTIA:
-                    inertia_elem.set(attr, str(MIN_INERTIA))
-            for attr in ["ixy", "ixz", "iyz"]:
-                inertia_elem.set(attr, "0")
-            fixed_count += 1
+        visual = link_elem.find("visual")
+        if visual is not None:
+            mesh = visual.find("geometry/mesh")
+            if mesh is not None:
+                info["mesh_file"] = mesh.get("filename", "").split("/")[-1]
 
-    if fixed_count > 0:
-        print(f"  Fixed {fixed_count} degenerate inertias for MuJoCo compatibility")
+        links[name] = info
 
-    tree.write(output_urdf_path, encoding="utf-8", xml_declaration=True)
+    children_of = {}
+    child_links = set()
+    for joint_elem in root.findall("joint"):
+        jname = joint_elem.get("name")
+        jtype = joint_elem.get("type")
+        parent = joint_elem.find("parent").get("link")
+        child = joint_elem.find("child").get("link")
+
+        origin = joint_elem.find("origin")
+        xyz = origin.get("xyz", "0 0 0") if origin is not None else "0 0 0"
+        rpy = origin.get("rpy", "0 0 0") if origin is not None else "0 0 0"
+
+        axis_e = joint_elem.find("axis")
+        axis = axis_e.get("xyz", "0 0 1") if axis_e is not None else "0 0 1"
+
+        limit = joint_elem.find("limit")
+        lower = float(limit.get("lower", "0")) if limit is not None else 0
+        upper = float(limit.get("upper", "0")) if limit is not None else 0
+
+        jinfo = {
+            "name": jname,
+            "type": jtype,
+            "xyz": xyz,
+            "rpy": rpy,
+            "axis": axis,
+            "lower": lower,
+            "upper": upper,
+        }
+        children_of.setdefault(parent, []).append((jinfo, child))
+        child_links.add(child)
+
+    root_link = next(
+        (name for name in links if name not in child_links), None
+    )
+    return links, children_of, root_link
 
 
-def compile_urdf_to_mjcf(urdf_path: str, mjcf_path: str) -> None:
+def build_xhand_body(
+    root_link: str, links: dict, children_of: dict, scale: float
+) -> ET.Element:
     """
-    Compile URDF to MJCF using MuJoCo's compiler.
+    Convert XHand URDF kinematic tree into a MuJoCo <body> XML subtree.
+
+    Fixed-joint children are merged into the parent body (visual geoms only).
+    Revolute-joint children become nested <body> elements with <joint>.
 
     Args:
-        urdf_path: Path to URDF file.
-        mjcf_path: Path to write MJCF output.
+        root_link: Name of the root hand link.
+        links: Dict of link data from parse_xhand_urdf.
+        children_of: Parent -> [(joint_info, child_name)] mapping.
+        scale: Mass scale factor to match measured weight.
+
+    Returns:
+        ET.Element: Root <body> element for the hand.
     """
-    try:
-        import mujoco
-    except ImportError:
-        print("ERROR: mujoco not installed. Install with: pip install mujoco")
-        sys.exit(1)
 
-    model = mujoco.MjModel.from_xml_path(urdf_path)
-    mujoco.mj_saveLastXML(mjcf_path, model)
-    print(f"  Compiled URDF to MJCF: {mjcf_path}")
-    print(f"  Bodies: {model.nbody}, Joints: {model.njnt}, Actuators: {model.nu}")
+    def _make_body(link_name: str) -> ET.Element:
+        link = links[link_name]
+        body = ET.Element("body")
+        body.set("name", link_name)
 
-
-def merge_physics_from_stock(
-    compiled_mjcf: str, stock_mjcf: str, output_mjcf: str, mesh_dir: str
-) -> None:
-    """
-    Merge physics properties from stock G1 MJCF into compiled G1+XHand MJCF.
-
-    Copies: contact pairs, tendons, sensors, visual settings, defaults.
-
-    Args:
-        compiled_mjcf: Path to MuJoCo-compiled MJCF (from URDF).
-        stock_mjcf: Path to stock G1 MJCF with physics properties.
-        output_mjcf: Path to write final MJCF.
-        mesh_dir: Absolute path to mesh directory for compiler meshdir.
-    """
-    compiled_tree = ET.parse(compiled_mjcf)
-    compiled_root = compiled_tree.getroot()
-    compiled_root.set("model", "g1_xhand")
-
-    stock_tree = ET.parse(stock_mjcf)
-    stock_root = stock_tree.getroot()
-
-    # Update compiler meshdir to point to our mesh directory
-    compiler = compiled_root.find("compiler")
-    if compiler is not None:
-        compiler.set("meshdir", mesh_dir)
-    else:
-        compiler = ET.SubElement(compiled_root, "compiler")
-        compiler.set("angle", "radian")
-        compiler.set("meshdir", mesh_dir)
-
-    # Collect all geom and joint names in the compiled model for validation
-    compiled_geoms = {
-        g.get("name") for g in compiled_root.iter("geom") if g.get("name")
-    }
-    compiled_joints = {
-        j.get("name") for j in compiled_root.iter("joint") if j.get("name")
-    }
-
-    # Copy contact section, filtering out pairs that reference missing geoms
-    stock_contact = stock_root.find("contact")
-    if stock_contact is not None and compiled_root.find("contact") is None:
-        new_contact = ET.SubElement(compiled_root, "contact")
-        kept = 0
-        for pair in stock_contact.findall("pair"):
-            g1 = pair.get("geom1", "")
-            g2 = pair.get("geom2", "")
-            # Keep only if both geoms exist (geom2='floor' added later)
-            if g1 in compiled_geoms and (g2 in compiled_geoms or g2 == "floor"):
-                new_contact.append(pair)
-                kept += 1
-        if kept == 0:
-            compiled_root.remove(new_contact)
+        mass = link.get("mass", 0) * scale
+        inertial = ET.SubElement(body, "inertial")
+        inertial.set("pos", link.get("inertial_pos", "0 0 0"))
+        if mass >= MIN_MASS:
+            inertial.set("mass", f"{mass:.6f}")
+            ii = link.get("inertia")
+            if ii:
+                ixx = max(ii["ixx"] * scale, MIN_INERTIA)
+                iyy = max(ii["iyy"] * scale, MIN_INERTIA)
+                izz = max(ii["izz"] * scale, MIN_INERTIA)
+                ixy, ixz, iyz = (
+                    ii["ixy"] * scale,
+                    ii["ixz"] * scale,
+                    ii["iyz"] * scale,
+                )
+                inertial.set(
+                    "fullinertia",
+                    f"{ixx:.8e} {iyy:.8e} {izz:.8e} "
+                    f"{ixy:.8e} {ixz:.8e} {iyz:.8e}",
+                )
+            else:
+                inertial.set(
+                    "diaginertia",
+                    f"{MIN_INERTIA} {MIN_INERTIA} {MIN_INERTIA}",
+                )
         else:
-            print(f"  Kept {kept} contact pairs from stock MJCF")
-
-    # Copy tendon section, filtering out entries that reference missing joints
-    stock_tendon = stock_root.find("tendon")
-    if stock_tendon is not None and compiled_root.find("tendon") is None:
-        new_tendon = ET.SubElement(compiled_root, "tendon")
-        kept = 0
-        for fixed in stock_tendon.findall("fixed"):
-            valid = True
-            for jref in fixed.findall("joint"):
-                if jref.get("joint", "") not in compiled_joints:
-                    valid = False
-                    break
-            if valid:
-                new_tendon.append(fixed)
-                kept += 1
-        if kept == 0:
-            compiled_root.remove(new_tendon)
-        else:
-            print(f"  Kept {kept} tendons from stock MJCF")
-
-    # Copy sensor section, filtering out sensors referencing missing sites
-    compiled_sites = {
-        s.get("name") for s in compiled_root.iter("site") if s.get("name")
-    }
-    stock_sensor = stock_root.find("sensor")
-    if stock_sensor is not None and compiled_root.find("sensor") is None:
-        new_sensor = ET.SubElement(compiled_root, "sensor")
-        kept = 0
-        for sensor_elem in stock_sensor:
-            obj = sensor_elem.get("objname", "") or sensor_elem.get("site", "")
-            if obj in compiled_sites or not obj:
-                new_sensor.append(sensor_elem)
-                kept += 1
-        if kept == 0:
-            compiled_root.remove(new_sensor)
-        else:
-            print(f"  Kept {kept} sensors from stock MJCF")
-
-    # Copy visual settings from stock
-    stock_visual = stock_root.find("visual")
-    if stock_visual is not None:
-        compiled_visual = compiled_root.find("visual")
-        if compiled_visual is not None:
-            compiled_root.remove(compiled_visual)
-        compiled_root.append(stock_visual)
-
-    # Add floor and lighting from stock (second worldbody)
-    # Stock has two worldbody elements: one for robot, one for floor/lights
-    stock_worldbodies = stock_root.findall("worldbody")
-    if len(stock_worldbodies) > 1:
-        floor_worldbody = stock_worldbodies[1]
-        compiled_root.append(floor_worldbody)
-
-    # Add skybox and ground textures from stock
-    stock_assets = stock_root.findall("asset")
-    if len(stock_assets) > 1:
-        scene_asset = stock_assets[1]
-        compiled_root.append(scene_asset)
-
-    # Add default classes for finger joints
-    defaults = compiled_root.find("default")
-    if defaults is None:
-        defaults = ET.SubElement(compiled_root, "default")
-
-    xhand_default = ET.SubElement(defaults, "default")
-    xhand_default.set("class", "xhand")
-    xhand_joint = ET.SubElement(xhand_default, "joint")
-    xhand_joint.set("frictionloss", "0.05")
-    xhand_joint.set("solimplimit", "0.97 0.995 0.001")
-
-    # Add IMU site if not present
-    compiled_worldbody = compiled_root.find("worldbody")
-    if compiled_worldbody is not None:
-        pelvis = compiled_worldbody.find(".//body[@name='pelvis']")
-        if pelvis is not None:
-            # Check if imu site exists
-            has_imu = any(
-                s.get("name") == "imu_in_pelvis"
-                for s in pelvis.findall("site")
+            inertial.set("mass", str(MIN_MASS))
+            inertial.set(
+                "diaginertia",
+                f"{MIN_INERTIA} {MIN_INERTIA} {MIN_INERTIA}",
             )
-            if not has_imu:
-                imu_site = ET.SubElement(pelvis, "site")
-                imu_site.set("name", "imu_in_pelvis")
-                imu_site.set("size", "0.01")
-                imu_site.set("pos", "0.04525 0 -0.08339")
 
-    compiled_tree.write(output_mjcf, encoding="utf-8", xml_declaration=True)
-    print(f"  Merged physics from stock MJCF")
-    print(f"  Output: {output_mjcf}")
+        if "mesh_file" in link:
+            geom = ET.SubElement(body, "geom")
+            geom.set("type", "mesh")
+            geom.set("mesh", Path(link["mesh_file"]).stem)
+            geom.set("class", "visual")
+
+        for jinfo, child_name in children_of.get(link_name, []):
+            if jinfo["type"] == "fixed":
+                child_link = links.get(child_name, {})
+                if "mesh_file" in child_link:
+                    g = ET.SubElement(body, "geom")
+                    g.set("type", "mesh")
+                    g.set("mesh", Path(child_link["mesh_file"]).stem)
+                    g.set("class", "visual")
+                    g.set("pos", jinfo["xyz"])
+                    rpy_vals = [float(v) for v in jinfo["rpy"].split()]
+                    if any(abs(v) > 1e-10 for v in rpy_vals):
+                        g.set("quat", _fmt_quat(rpy_to_quat(*rpy_vals)))
+            else:
+                child_body = _make_body(child_name)
+                child_body.set("pos", jinfo["xyz"])
+                rpy_vals = [float(v) for v in jinfo["rpy"].split()]
+                if any(abs(v) > 1e-10 for v in rpy_vals):
+                    child_body.set(
+                        "quat", _fmt_quat(rpy_to_quat(*rpy_vals))
+                    )
+                joint_elem = ET.Element("joint")
+                joint_elem.set("name", jinfo["name"])
+                joint_elem.set("axis", jinfo["axis"])
+                joint_elem.set("range", f"{jinfo['lower']} {jinfo['upper']}")
+                joint_elem.set("class", "xhand")
+                # Reason: insert after inertial so MuJoCo sees joint before geoms
+                child_body.insert(1, joint_elem)
+                body.append(child_body)
+
+        return body
+
+    return _make_body(root_link)
 
 
 def main():
     """Entry point for MJCF generation."""
     parser = argparse.ArgumentParser(
-        description="Generate G1+XHand MJCF for MuJoCo simulation"
-    )
-    parser.add_argument(
-        "--urdf",
-        type=str,
-        default=None,
-        help="Path to combined G1+XHand URDF",
+        description="Generate G1+XHand MJCF by modifying stock G1 MJCF"
     )
     parser.add_argument(
         "--stock-mjcf",
-        type=str,
         default="/opt/ros/humble/share/unitree_description/mjcf/g1.xml",
-        help="Path to stock G1 MJCF (for physics properties)",
     )
-    parser.add_argument(
-        "--output",
-        type=str,
-        default=None,
-        help="Path to write final MJCF",
-    )
-    parser.add_argument(
-        "--mesh-dir",
-        type=str,
-        default=None,
-        help="Path to mesh directory",
-    )
-
+    parser.add_argument("--output", default=None)
+    parser.add_argument("--xhand-right", default=None)
+    parser.add_argument("--xhand-left", default=None)
     args = parser.parse_args()
 
-    script_dir = Path(__file__).resolve().parent
-    pkg_dir = script_dir.parent
+    pkg_dir = Path(__file__).resolve().parent.parent
+    output = args.output or str(pkg_dir / "mjcf" / "g1_xhand.xml")
+    xhand_r = args.xhand_right or str(
+        pkg_dir / "urdf" / "xhand_source" / "xhand_right.urdf"
+    )
+    xhand_l = args.xhand_left or str(
+        pkg_dir / "urdf" / "xhand_source" / "xhand_left.urdf"
+    )
 
-    urdf_path = args.urdf or str(pkg_dir / "urdf" / "g1_xhand" / "main.urdf")
-    output_path = args.output or str(pkg_dir / "mjcf" / "g1_xhand.xml")
-    mesh_dir = args.mesh_dir or str(pkg_dir / "meshes")
+    Path(output).parent.mkdir(parents=True, exist_ok=True)
 
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-
-    print(f"Input URDF:  {urdf_path}")
     print(f"Stock MJCF:  {args.stock_mjcf}")
-    print(f"Mesh dir:    {mesh_dir}")
-    print(f"Output MJCF: {output_path}")
+    print(f"XHand Right: {xhand_r}")
+    print(f"XHand Left:  {xhand_l}")
+    print(f"Output:      {output}")
     print()
 
-    # Step 1: Resolve mesh paths in URDF
-    # Write resolved URDF next to meshes so MuJoCo can find them
-    resolved_urdf = str(Path(mesh_dir) / "_resolved_g1_xhand.urdf")
-    resolve_mesh_paths(urdf_path, resolved_urdf, mesh_dir)
-    print("Step 1: Resolved mesh paths in URDF")
+    # --- Step 1: Parse inputs ---
+    print("Step 1: Parsing stock G1 MJCF and XHand URDFs...")
+    stock_text = Path(args.stock_mjcf).read_text()
+    stock_text = stock_text.replace("<contact>>", "<contact>")
+    mjcf = ET.fromstring(stock_text)
 
-    # Step 2: Compile URDF to MJCF using MuJoCo
-    compiled_mjcf = str(Path(mesh_dir) / "_compiled_g1_xhand.xml")
-    print("Step 2: Compiling URDF to MJCF via MuJoCo...")
-    compile_urdf_to_mjcf(resolved_urdf, compiled_mjcf)
+    r_links, r_children, r_root = parse_xhand_urdf(xhand_r)
+    l_links, l_children, l_root = parse_xhand_urdf(xhand_l)
 
-    # Step 3: Merge physics from stock G1 MJCF
-    print("Step 3: Merging physics from stock G1 MJCF...")
-    merge_physics_from_stock(compiled_mjcf, args.stock_mjcf, output_path, mesh_dir)
+    r_total = sum(lk["mass"] for lk in r_links.values())
+    l_total = sum(lk["mass"] for lk in l_links.values())
+    r_scale = HAND_MASS_TARGET / r_total if r_total > 0 else 1.0
+    l_scale = HAND_MASS_TARGET / l_total if l_total > 0 else 1.0
+    print(
+        f"  Right hand: {r_total:.4f} kg -> {HAND_MASS_TARGET} kg "
+        f"(scale {r_scale:.4f})"
+    )
+    print(
+        f"  Left hand:  {l_total:.4f} kg -> {HAND_MASS_TARGET} kg "
+        f"(scale {l_scale:.4f})"
+    )
 
-    # Cleanup
-    Path(resolved_urdf).unlink(missing_ok=True)
-    Path(compiled_mjcf).unlink(missing_ok=True)
+    # --- Step 2: Update model name and mesh paths ---
+    print("Step 2: Updating mesh paths...")
+    mjcf.set("model", "g1_xhand")
 
-    print(f"\nDone! MJCF written to: {output_path}")
+    compiler = mjcf.find("compiler")
+    if compiler is not None:
+        compiler.set("meshdir", "../meshes")
+
+    asset = mjcf.find("asset")
+    rubber_to_remove = []
+    for mesh in asset.findall("mesh"):
+        name = mesh.get("name", "")
+        if name in ("left_rubber_hand", "right_rubber_hand"):
+            rubber_to_remove.append(mesh)
+        else:
+            old_file = mesh.get("file", "")
+            mesh.set("file", f"g1/{old_file}")
+
+    for m in rubber_to_remove:
+        asset.remove(m)
+        print(f"  Removed rubber hand mesh: {m.get('name')}")
+
+    xhand_meshes = set()
+    for links_dict in (r_links, l_links):
+        for lk in links_dict.values():
+            if "mesh_file" in lk:
+                xhand_meshes.add(lk["mesh_file"])
+
+    for mf in sorted(xhand_meshes):
+        m = ET.SubElement(asset, "mesh")
+        m.set("name", Path(mf).stem)
+        m.set("file", mf)
+    print(f"  Added {len(xhand_meshes)} XHand mesh assets")
+
+    # --- Step 3: Add XHand joint default class ---
+    print("Step 3: Adding XHand joint defaults...")
+    defaults = mjcf.find("default")
+    if defaults is not None:
+        g1_default = defaults.find("default[@class='g1']")
+        parent = g1_default if g1_default is not None else defaults
+        xhand_def = ET.SubElement(parent, "default")
+        xhand_def.set("class", "xhand")
+        xjoint = ET.SubElement(xhand_def, "joint")
+        xjoint.set("frictionloss", "0.02")
+        xjoint.set("armature", "0.001")
+        xjoint.set("damping", "0.05")
+
+    # --- Step 4: Replace rubber hands with XHand bodies ---
+    print("Step 4: Replacing rubber hands with XHand bodies...")
+    worldbody = mjcf.find("worldbody")
+
+    configs = [
+        ("right", r_links, r_children, r_root, r_scale, HAND_OFFSET_RIGHT),
+        ("left", l_links, l_children, l_root, l_scale, HAND_OFFSET_LEFT),
+    ]
+
+    for side, links, children, root_link, scale, offset in configs:
+        wrist = worldbody.find(f".//body[@name='{side}_wrist_yaw_link']")
+        if wrist is None:
+            print(f"  WARNING: {side}_wrist_yaw_link not found!")
+            continue
+
+        for geom in list(wrist.findall("geom")):
+            if "rubber_hand" in geom.get("mesh", ""):
+                wrist.remove(geom)
+            elif "hand_collision" in geom.get("name", ""):
+                wrist.remove(geom)
+
+        for site in list(wrist.findall("site")):
+            if "palm" in site.get("name", ""):
+                wrist.remove(site)
+
+        xhand_body = build_xhand_body(root_link, links, children, scale)
+        xhand_body.set("pos", offset)
+
+        palm = ET.SubElement(xhand_body, "site")
+        palm.set("name", f"{side}_palm")
+        palm.set("pos", "0 0 0.08")
+        palm.set("size", "0.01")
+
+        wrist.append(xhand_body)
+        print(f"  Inserted {side} XHand body tree")
+
+    # --- Step 5: Write output ---
+    print(f"\nStep 5: Writing MJCF to {output}")
+    ET.indent(mjcf, space="    ")
+    tree = ET.ElementTree(mjcf)
+    tree.write(output, encoding="unicode", xml_declaration=True)
+
+    try:
+        import mujoco
+
+        model = mujoco.MjModel.from_xml_path(output)
+        print(
+            f"  MuJoCo verification OK: {model.nbody} bodies, "
+            f"{model.njnt} joints, {model.nsensor} sensors"
+        )
+    except ImportError:
+        print("  (mujoco not installed, skipping verification)")
+    except Exception as e:
+        print(f"  MuJoCo verification FAILED: {e}")
+
+    print(f"\nDone! MJCF written to: {output}")
 
 
 if __name__ == "__main__":
